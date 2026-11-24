@@ -1,4 +1,4 @@
-# TP1 — SOAP et WSDL — Réponses (Partie A : code-first)
+# Partie A — Code-first
 
 ## Étape 1 — Créer et lancer le service
 
@@ -74,12 +74,71 @@
    - SOAP 1.1 : `<faultcode>`, `<faultstring>`, `<detail>`.
    - Les deux renvoient HTTP 500. SOAP 1.2 distingue Sender/Receiver et permet plusieurs textes localisés.
 
-## Remarque technique
+# Partie B — Contract-first
 
-Le lancement recommandé `mvn compile exec:java` fonctionne pour les réponses normales, mais les Faults échouaient initialement car les threads HTTP héritaient du classloader de Maven (implémentation JAXB invisible). Le `Serveur.java` a été adapté pour définir un `Executor` dont les threads utilisent le classloader de l'application, ce qui permet la sérialisation des Faults sans modifier le contrat.
+## Étape 5 — Générer le code depuis le WSDL
 
-## Rendu
+1. Dans ce WSDL, retrouvez l'opération, son message de fault et l'action SOAP à envoyer.
+   - Opération : `emprunterLivre` dans le `portType` `EmpruntPortType`.
+   - Fault : `LivreIndisponible` (message `LivreIndisponibleFault`, élément `bib:LivreIndisponible`).
+   - Action SOAP : `http://supnum.mr/bib/emprunterLivre` (`soap:operation soapAction="..."`).
 
-- Projet Maven : `emprunt-codefirst/`
-- Messages SOAP : dossier `xml/`
-- Ce fichier : `reponses.md`
+2. Quelle est la signature de `emprunterLivre` dans `EmpruntPortType` ?
+   - `EmpruntType emprunterLivre(String idAdherent, String isbn) throws LivreIndisponibleFault;`
+   - Annotations générées : `@WebMethod(action = "http://supnum.mr/bib/emprunterLivre")`, `@WebResult(name = "emprunt")`, `@RequestWrapper(...EmprunterLivre)` et `@ResponseWrapper(...EmprunterLivreResponse)`.
+
+3. Quel type Java a été généré pour `dateRetour` ? Comparez avec la partie A.
+   - `javax.xml.datatype.XMLGregorianCalendar`, avec `@XmlSchemaType(name = "date")` (le WSDL déclare `xs:date`).
+   - Partie A : `String` (le WSDL code-first déclarait `xs:string`). Le contrat B est donc plus précis.
+
+4. Quel est le nom de la classe d'exception générée, et d'où vient ce nom dans le WSDL ?
+   - `mr.supnum.bib.contrat.LivreIndisponibleFault` (`@WebFault(name = "LivreIndisponible", targetNamespace = "http://supnum.mr/bib")`).
+   - Il vient du `wsdl:fault name="LivreIndisponible"` : `LivreIndisponible` devient le bean du détail, et l'exception prend le suffixe `Fault` pour éviter le conflit de noms.
+
+## Étape 6 — Implémenter et comparer
+
+1. Le WSDL publié est-il celui que vous avez fourni ? Contient-il le motif de l'ISBN et le type `xs:date` ?
+   - Oui : avec `wsdlLocation = "wsdl/EmpruntService.wsdl"`, Metro publie exactement le contrat fourni (`GET ?wsdl` → HTTP 200).
+   - On y retrouve `IsbnType` avec le motif `97[89]-\d-\d{2,5}-\d{2,6}-\d`, et `dateRetour` / `retourPrevu` en `xs:date`.
+
+2. Avez-vous dû modifier `01-emprunter.xml` pour qu'il fonctionne ici ? Pourquoi ?
+   - Oui. Le schéma du contrat B a `elementFormDefault="qualified"` : les enfants du wrapper doivent être qualifiés (`<bib:idAdherent>`, `<bib:isbn>`). Le XSD généré en partie A laissait les enfants non qualifiés.
+   - Sans préfixe (et avant l'ajout de `@SchemaValidation` à l'étape 6.5), JAXB reçoit `isbn = null` et le service répond une Fault `S:Server` « Cannot invoke "String.equals(Object)" because "isbn" is null ». Avec `@SchemaValidation`, la requête est rejetée plus tôt par la validation du schéma.
+   - Variantes prêtes : `xml/10-emprunter-contractfirst.xml`, `xml/11-emprunter-contractfirst-fault.xml`, `xml/12-emprunter-contractfirst-invalide.xml`.
+
+3. Sans `@SchemaValidation`, l'ISBN `978-2-10` est-il refusé ? Et avec ? Quelle Fault obtenez-vous ?
+   - Sans : non, HTTP 200 avec un emprunt `E-2026-0812` ; l'implémentation ne teste que l'égalité avec `978-2-10-074444-4`, le motif du WSDL n'est pas vérifié à l'exécution.
+   - Avec : HTTP 500, faultcode `S:Client`, faultstring `org.xml.sax.SAXParseException; cvc-pattern-valid: Value '978-2-10' is not facet-valid with respect to pattern '97[89]-\d-\d{2,5}-\d{2,6}-\d' for type 'IsbnType'.` (pas de `<detail>`).
+
+4. Retirez `wsdlLocation` de l'annotation et redémarrez : qu'est-ce qui change dans le WSDL publié ?
+   - Metro régénère le WSDL depuis les annotations/classes au lieu de servir le contrat.
+   - `isbn` devient `xs:string` : le `simpleType IsbnType` et son motif disparaissent.
+   - `dateRetour` et `retourPrevu` restent `xs:date` grâce à `@XmlSchemaType(name = "date")`.
+   - Le WSDL importe son schéma via `?xsd=1` et expose des actions WS-Addressing ; le contrat n'est plus garanti.
+
+## Conclusion — Choisir et rendre
+
+1. Citez deux différences que vous avez observées entre le WSDL de la partie A et celui de la partie B.
+   - Types : partie A `isbn`/`dateRetour` en `xs:string` sans règle ; partie B `IsbnType` avec motif et `dateRetour`/`retourPrevu` en `xs:date`.
+   - Forme : partie B a `elementFormDefault="qualified"` (paramètres qualifiés) et une `soapAction` explicite ; partie A laisse les enfants non qualifiés. La partie B ne déclare que `emprunterLivre`, la partie A expose aussi `rendreLivre`.
+
+2. Si on renomme le champ `dateRetour` dans le code, quel projet voit son contrat changer ? Quel risque pour les clients ?
+   - Partie A (code-first) : le WSDL est généré depuis le code, donc renommer le champ change le contrat publié, silencieusement.
+   - Partie B (contract-first) : le WSDL ne change pas tant que le contrat n'est pas modifié ; le code doit rester aligné sur le contrat.
+   - Risque : rupture de compatibilité (élément XML renommé), erreurs de désérialisation ou champs vides chez les clients existants.
+
+3. Quelle approche choisiriez-vous pour le service Paiement, appelé par Scolarité (.NET), Bibliothèque (PHP) et le portail (Node.js) ? Et pour un prototype interne de deux jours ?
+   - Paiement : contract-first. Plusieurs équipes et langages partagent le même contrat ; le WSDL versionné sert de référence et chaque client génère ses stubs depuis ce contrat.
+   - Prototype interne de deux jours : code-first, plus rapide ; on fige le WSDL avant toute mise en production.
+
+## Vérifications effectuées
+
+- État final du projet : `wsdlLocation` restauré + `@SchemaValidation` ajouté (étape 6.5).
+- `mvn clean compile` : BUILD SUCCESS (11 sources : 2 écrites + 9 générées par wsimport).
+- WSDL publié : `GET http://localhost:8080/bib/EmpruntService?wsdl` → HTTP 200, `IsbnType`, `xs:date`, `soapAction` présents.
+- Emprunt valide (`xml/10-...`) → HTTP 200, `E-2026-0812`, `dateRetour 2026-12-08`.
+- Livre indisponible (`xml/11-...`) → HTTP 500, `S:Server`, `<detail><LivreIndisponible>...`.
+- ISBN invalide sans `@SchemaValidation` (`xml/12-...`) → HTTP 200.
+- ISBN invalide avec `@SchemaValidation` → HTTP 500, `S:Client`, `cvc-pattern-valid`.
+
+
